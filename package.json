@@ -5,6 +5,11 @@
   "author": "Kibernum IT Academy",
   "private": true,
   "license": "UNLICENSED",
+  "pnpm": {
+    "overrides": {
+      "lodash": "4.18.1"
+    }
+  },
   "scripts": {
     "build": "nest build",
     "start": "node dist/main",
