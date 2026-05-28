@@ -25,8 +25,6 @@ async function bootstrap() {
     credentials: true,
   });
 
-  // Prefijo global — versionado desde el inicio
-  app.setGlobalPrefix("auth");
 
   // ValidationPipe global — valida todos los DTOs
   // whitelist: elimina campos no declarados en el DTO
