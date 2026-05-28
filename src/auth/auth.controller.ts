@@ -121,6 +121,13 @@ export class AuthController {
     return res.status(HttpStatus.NO_CONTENT).send();
   }
 
+  // GET /auth/health — liveness/readiness probe de K8s y Dockerfile HEALTHCHECK
+  @Public()
+  @Get("health")
+  health() {
+    return { status: "ok", service: "clinic-auth-service" };
+  }
+
   // GET /auth/validate — endpoint interno para Kong
   // Kong llama a este endpoint para validar tokens antes de enrutar
   // No está expuesto al cliente — solo accesible desde la red interna
