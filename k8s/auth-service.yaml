@@ -1,0 +1,293 @@
+# ============================================================
+#  k8s/auth-service.yaml
+#  Manifiestos Kubernetes del clinic-auth-service
+#  Namespace: clinic (el mismo clúster Kind que ya tenemos)
+#
+#  Orden de aplicación:
+#    1. Secrets (kubectl create secret — nunca en YAML)
+#    2. ConfigMap
+#    3. PVC + Deployment de PostgreSQL
+#    4. Deployment de Valkey
+#    5. Este archivo (auth-service)
+# ============================================================
+
+# ---- ConfigMap — variables NO sensibles ---------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auth-service-config       # nombre del ConfigMap
+  namespace: clinic               # namespace del clúster
+data:
+  NODE_ENV: "production"          # entorno de ejecución
+  PORT: "3001"                    # puerto del microservicio
+  DB_HOST: "auth-postgres"        # Service de PostgreSQL del auth-service
+  DB_PORT: "5432"                 # puerto de PostgreSQL
+  DB_NAME: "auth_db"              # BD propia del auth-service
+  DB_SSL: "false"                 # sin SSL en red interna del clúster
+  VALKEY_HOST: "auth-valkey"      # Service de Valkey del auth-service
+  VALKEY_PORT: "6379"             # puerto de Valkey
+  JWT_EXPIRATION: "15m"           # vida del access token
+  JWT_REFRESH_EXPIRATION: "7d"    # vida del refresh token
+  JWT_ISSUER: "clinic-auth"       # emisor del token
+  JWT_AUDIENCE: "clinic-web"      # audiencia del token
+  ALLOWED_ORIGINS: "http://192.168.1.28:8000"  # origen del frontend
+  SWAGGER_USER: "admin"           # usuario Swagger (solo dev)
+
+---
+# ---- PVC — almacenamiento persistente para PostgreSQL -------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: auth-postgres-pvc         # nombre del PVC
+  namespace: clinic
+spec:
+  accessModes:
+    - ReadWriteOnce               # lectura/escritura desde un solo nodo
+  resources:
+    requests:
+      storage: 1Gi                # BD del auth-service — 1GB es suficiente
+
+---
+# ---- Deployment — PostgreSQL propio del auth-service --------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-postgres             # nombre del Deployment
+  namespace: clinic
+spec:
+  replicas: 1                     # BD — siempre 1 réplica (con estado)
+  selector:
+    matchLabels:
+      app: auth-postgres          # selector de Pods
+  template:
+    metadata:
+      labels:
+        app: auth-postgres        # etiqueta del Pod
+    spec:
+      containers:
+        - name: auth-postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: auth-postgres-secret   # Secret del auth-service
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: auth-postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: auth-postgres-secret
+                  key: POSTGRES_DB
+          volumeMounts:
+            - name: auth-postgres-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, auth_user, -d, auth_db]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: auth-postgres-data
+          persistentVolumeClaim:
+            claimName: auth-postgres-pvc
+
+---
+# ---- Service — red interna para PostgreSQL ------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-postgres             # nombre usado en DB_HOST
+  namespace: clinic
+spec:
+  selector:
+    app: auth-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+# ---- Deployment — Valkey propio del auth-service ------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-valkey
+  namespace: clinic
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-valkey
+  template:
+    metadata:
+      labels:
+        app: auth-valkey
+    spec:
+      containers:
+        - name: auth-valkey
+          image: valkey/valkey:8-alpine
+          ports:
+            - containerPort: 6379
+          command:
+            - valkey-server
+            - --requirepass
+            - $(VALKEY_PASSWORD)
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: auth-valkey-secret    # Secret del auth-service
+                  key: VALKEY_PASSWORD
+          readinessProbe:
+            exec:
+              command: [valkey-cli, ping]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+---
+# ---- Service — red interna para Valkey ----------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-valkey               # nombre usado en VALKEY_HOST
+  namespace: clinic
+spec:
+  selector:
+    app: auth-valkey
+  ports:
+    - port: 6379
+      targetPort: 6379
+
+---
+# ---- Deployment — el microservicio auth ---------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: clinic
+spec:
+  replicas: 2                     # 2 réplicas — alta disponibilidad
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      containers:
+        - name: auth-service
+          image: ghcr.io/miguelangelramos/clinic-auth-service:latest
+          imagePullPolicy: Always  # siempre descarga :latest
+          ports:
+            - containerPort: 3001
+          envFrom:
+            - configMapRef:
+                name: auth-service-config   # variables no sensibles
+          env:
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: auth-postgres-secret
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: auth-postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: auth-valkey-secret
+                  key: VALKEY_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: auth-jwt-secret
+                  key: JWT_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: auth-jwt-secret
+                  key: JWT_REFRESH_SECRET
+            - name: SWAGGER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: auth-jwt-secret
+                  key: SWAGGER_PASSWORD
+          resources:
+            requests:
+              cpu: 100m            # mínimo garantizado — base para el HPA
+              memory: 128Mi
+            limits:
+              cpu: 500m            # techo de CPU
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /auth/health   # endpoint de salud
+              port: 3001
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /auth/health
+              port: 3001
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            failureThreshold: 5
+
+---
+# ---- Service — expone el auth-service dentro del clúster ----
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service              # nombre para el Ingress y Kong
+  namespace: clinic
+spec:
+  selector:
+    app: auth-service
+  ports:
+    - port: 3001
+      targetPort: 3001
+
+---
+# ---- HPA — escalamiento automático del auth-service ---------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: auth-service-hpa
+  namespace: clinic
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: auth-service
+  minReplicas: 2                  # mínimo 2 — alta disponibilidad
+  maxReplicas: 6                  # hasta 6 en picos de login
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60  # umbral más alto que el monolito
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 120  # más conservador — evitar flapping en logins
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

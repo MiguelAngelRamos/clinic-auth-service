@@ -1,0 +1,280 @@
+# ============================================================
+#  clinic-auth-service — Pipeline CI/CD + DevSecOps
+#  7 jobs: lint → test → sast → sca → dockerfile-lint → build → push
+# ============================================================
+name: CI/CD · clinic-auth-service
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancelar runs anteriores en la misma rama/PR
+# Ahorra minutos de Actions — solo importa el último push
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10"
+  IMAGE_NAME: clinic-auth-service
+
+# Permisos mínimos globales — contents:read para checkout
+permissions:
+  contents: read
+
+jobs:
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 1 — install-and-lint
+  #  Puerta de entrada: instala deps y corre ESLint
+  #  Si falla, bloquea todos los jobs downstream
+  # ──────────────────────────────────────────────────────────
+  install-and-lint:
+    name: Install & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      # --frozen-lockfile garantiza builds reproducibles
+      # Falla si el lockfile no coincide con package.json
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 2 — test
+  #  Tests unitarios con cobertura
+  # ──────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: install-and-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests with coverage
+        run: pnpm exec jest --coverage --ci --passWithNoTests
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/
+          retention-days: 14
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 3 — sast-codeql
+  #  Análisis estático de seguridad con CodeQL
+  #  Detecta: XSS, injection, auth flaws, path traversal
+  # ──────────────────────────────────────────────────────────
+  sast-codeql:
+    name: SAST (CodeQL)
+    runs-on: ubuntu-latest
+    needs: install-and-lint
+    # Permisos adicionales solo en este job — mínimo privilegio
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 4 — sca-audit
+  #  Software Composition Analysis — CVEs en dependencias
+  #  Solo bloquea por vulnerabilidades HIGH o CRITICAL en producción
+  # ──────────────────────────────────────────────────────────
+  sca-audit:
+    name: SCA (pnpm audit)
+    runs-on: ubuntu-latest
+    needs: install-and-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Workaround pnpm 9: --audit-level no funciona con exit codes
+      # Capturamos JSON y aplicamos el umbral manualmente con jq
+      - name: Run audit
+        run: |
+          set +e
+          pnpm audit --prod --json > pnpm-audit.json
+          set -e
+          HIGH=$(jq '(.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.critical // 0)' pnpm-audit.json)
+          echo "Vulnerabilidades HIGH/CRITICAL en producción: $HIGH"
+          if [ "$HIGH" -gt 0 ]; then
+            echo "::error::Se encontraron $HIGH vulnerabilidades HIGH/CRITICAL en dependencias de producción"
+            exit 1
+          fi
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pnpm-audit-${{ github.sha }}
+          path: pnpm-audit.json
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 5 — dockerfile-lint
+  #  Hadolint — detecta malas prácticas en el Dockerfile
+  #  Corre en paralelo — no bloquea los jobs de tests/sast
+  # ──────────────────────────────────────────────────────────
+  dockerfile-lint:
+    name: Dockerfile Lint (Hadolint)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          format: sarif
+          output-file: hadolint.sarif
+          no-fail: true
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint.sarif
+          category: hadolint
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 6 — docker-build
+  #  Construye la imagen pero NO hace push
+  #  Valida que el Dockerfile compila correctamente
+  #  Espera que todos los jobs de seguridad pasen
+  # ──────────────────────────────────────────────────────────
+  docker-build:
+    name: Docker Build (validate)
+    runs-on: ubuntu-latest
+    needs: [test, sast-codeql, sca-audit, dockerfile-lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:ci-${{ github.sha }}
+          # Caché de capas entre runs — acelera builds si las deps no cambiaron
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ──────────────────────────────────────────────────────────
+  #  JOB 7 — push-to-ghcr
+  #  Publica la imagen en GitHub Container Registry
+  #  Solo en push a main — no en PRs
+  # ──────────────────────────────────────────────────────────
+  push-to-ghcr:
+    name: Push to GHCR
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # ghcr.io requiere el owner en minúsculas
+      - name: Prepare image metadata
+        id: meta
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SHA="${GITHUB_SHA::7}"
+          echo "owner=${OWNER}" >> $GITHUB_OUTPUT
+          echo "sha=${SHA}" >> $GITHUB_OUTPUT
+          echo "image=ghcr.io/${OWNER}/${{ env.IMAGE_NAME }}" >> $GITHUB_OUTPUT
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN — secreto automático de GitHub Actions
+          # No requiere configuración adicional
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
