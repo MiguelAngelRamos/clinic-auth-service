@@ -32,6 +32,9 @@ data:
   JWT_AUDIENCE: "clinic-web"      # audiencia del token
   ALLOWED_ORIGINS: "http://192.168.1.28:8000"  # origen del frontend
   SWAGGER_USER: "admin"           # usuario Swagger (solo dev)
+  RABBITMQ_HOST: "rabbitmq"       # Service K8s de RabbitMQ
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_VHOST: "clinic"
 
 ---
 # ---- PVC — almacenamiento persistente para PostgreSQL -------
@@ -146,7 +149,10 @@ spec:
                   key: VALKEY_PASSWORD
           readinessProbe:
             exec:
-              command: [valkey-cli, ping]
+              command:
+                - /bin/sh
+                - -c
+                - "valkey-cli -a $VALKEY_PASSWORD ping"
             initialDelaySeconds: 5
             periodSeconds: 5
 
@@ -221,6 +227,16 @@ spec:
                 secretKeyRef:
                   name: auth-jwt-secret
                   key: SWAGGER_PASSWORD
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_USER
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_PASSWORD
           resources:
             requests:
               cpu: 100m            # mínimo garantizado — base para el HPA
