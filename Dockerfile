@@ -15,7 +15,7 @@ FROM node:22.11.0-alpine3.20 AS deps
 RUN apk add --no-cache python3 make g++ libc6-compat
 
 # Activar pnpm via corepack — sin npm install -g
-RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+RUN npm install -g pnpm@10.33.0
 
 WORKDIR /app
 
@@ -32,7 +32,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
 # ---- Stage 2: builder ---------------------------------------
 FROM node:22.11.0-alpine3.20 AS builder
 
-RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+RUN npm install -g pnpm@10.33.0
 
 WORKDIR /app
 
