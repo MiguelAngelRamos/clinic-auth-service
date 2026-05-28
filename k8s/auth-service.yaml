@@ -32,9 +32,8 @@ data:
   JWT_AUDIENCE: "clinic-web"      # audiencia del token
   ALLOWED_ORIGINS: "http://192.168.1.28:8000"  # origen del frontend
   SWAGGER_USER: "admin"           # usuario Swagger (solo dev)
-  RABBITMQ_HOST: "rabbitmq"       # Service K8s de RabbitMQ
-  RABBITMQ_PORT: "5672"
-  RABBITMQ_VHOST: "clinic"
+  # NOTA: RABBITMQ_HOST/PORT/VHOST eliminados — K8s autoinyecta
+  # RABBITMQ_PORT="tcp://IP:5672" por service-discovery legacy. Ver RABBITMQ_URL abajo.
 
 ---
 # ---- PVC — almacenamiento persistente para PostgreSQL -------
@@ -237,6 +236,10 @@ spec:
                 secretKeyRef:
                   name: rabbitmq-secret
                   key: RABBITMQ_PASSWORD
+            # K8s sustituye $(RABBITMQ_USER) y $(RABBITMQ_PASSWORD) porque
+            # están definidas antes en esta lista env.
+            - name: RABBITMQ_URL
+              value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq:5672/clinic"
           resources:
             requests:
               cpu: 100m            # mínimo garantizado — base para el HPA
